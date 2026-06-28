@@ -55,8 +55,8 @@ export default function TutorialOverlay({ id, steps, autoShow = true }) {
       {/* Overlay */}
       {visible && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-label="Tutorial">
-          {/* Backdrop */}
-          <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={close} />
+          {/* Backdrop — must be fixed (not absolute) to cover full viewport even inside transformed parents */}
+          <div className="fixed inset-0 bg-black/40 backdrop-blur-sm" onClick={close} />
 
           {/* Card */}
           <div className="relative bg-white rounded-3xl shadow-2xl max-w-sm w-full overflow-hidden animate-in fade-in zoom-in-95 duration-200">
