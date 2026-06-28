@@ -2,16 +2,18 @@ import { useState, useRef, useCallback } from 'react';
 import {
   Video, Upload, Download, ShieldCheck, Loader2,
   CheckCircle2, AlertCircle, X, Film,
-  Zap, RefreshCw, Play, Pause,
+  Zap, RefreshCw, Play, Pause, BarChart2,
 } from 'lucide-react';
 import {
   extractFrames, compressFrames, decompressFrames,
   embedDataInVideoKeyframe, extractDataFromVideoKeyframe,
   getVideoCompressionStats, playFrames,
 } from '../utils/videoCodec';
+import { calculatePSNR } from '../utils/imageProcessing';
 import { compressToZip, extractFromZip } from '../utils/compression';
 import { useLang } from '../i18n/LangContext';
 import TutorialOverlay from '../components/TutorialOverlay';
+import BeforeAfterViewer from '../components/BeforeAfterViewer';
 
 function Tab({ active, onClick, children }) {
   return (
@@ -65,6 +67,8 @@ export default function VideoCodec() {
   const [encProcessing, setEncProcessing] = useState(false);
   const [encResult, setEncResult] = useState(null);
   const [encError, setEncError] = useState(null);
+  const [encPsnr, setEncPsnr] = useState(null);       // PSNR keyframe
+  const [keyframePair, setKeyframePair] = useState(null); // { before, after } data URLs
 
   // Decode state
   const [decFile, setDecFile] = useState(null);
@@ -120,6 +124,24 @@ export default function VideoCodec() {
       const zipBlob = await compressToZip(jsonBlob, 'medical_video_encoded.json');
       setEncProgress(100);
       setEncStage('Done');
+
+      // PSNR: compare first original frame vs first decompressed frame
+      try {
+        const decompCheck = await decompressFrames(compressed.slice(0, 1), width, height);
+        if (decompCheck.length > 0 && frames.length > 0) {
+          const psnr = calculatePSNR(frames[0], decompCheck[0]);
+          setEncPsnr(psnr);
+          // Build keyframe before/after data URLs
+          const cvBefore = document.createElement('canvas');
+          cvBefore.width = frames[0].width; cvBefore.height = frames[0].height;
+          cvBefore.getContext('2d').putImageData(frames[0], 0, 0);
+          const cvAfter = document.createElement('canvas');
+          cvAfter.width = decompCheck[0].width; cvAfter.height = decompCheck[0].height;
+          cvAfter.getContext('2d').putImageData(decompCheck[0], 0, 0);
+          setKeyframePair({ before: cvBefore.toDataURL(), after: cvAfter.toDataURL() });
+        }
+      } catch (_) { /* non-critical */ }
+
       setEncResult({ zipBlob, stats, width, height, duration });
 
     } catch (err) {
@@ -353,6 +375,50 @@ export default function VideoCodec() {
                   <div className="bg-gray-50 rounded-xl p-3"><p className="text-xs text-text/40">Duration</p><p className="font-bold text-text">{encResult.duration}s</p></div>
                   <div className="bg-gray-50 rounded-xl p-3"><p className="text-xs text-text/40">Sample Rate</p><p className="font-bold text-text">5 FPS</p></div>
                 </div>
+
+                {/* Keyframe Before / After viewer */}
+                {keyframePair && (
+                  <div className="space-y-2">
+                    <p className="text-xs font-bold uppercase tracking-widest text-primary/60 flex items-center gap-1.5">
+                      <BarChart2 className="w-3.5 h-3.5" /> Keyframe Quality — Original vs After JPEG Compression
+                    </p>
+                    <BeforeAfterViewer
+                      beforeSrc={keyframePair.before}
+                      afterSrc={keyframePair.after}
+                      beforeLabel="Original Frame"
+                      afterLabel="Decompressed"
+                      height={220}
+                    />
+                  </div>
+                )}
+
+                {/* PSNR */}
+                {encPsnr && (
+                  <div className={`p-3 rounded-xl border flex items-center gap-3 ${
+                    encPsnr.quality === 'excellent' ? 'bg-green-50 border-green-200' :
+                    encPsnr.quality === 'good'      ? 'bg-blue-50 border-blue-200' :
+                    encPsnr.quality === 'fair'      ? 'bg-yellow-50 border-yellow-200' :
+                                                       'bg-red-50 border-red-200'}`}>
+                    <Zap className="w-4 h-4 text-primary flex-shrink-0" />
+                    <div>
+                      <p className="text-xs font-bold text-text">
+                        Keyframe PSNR: {encPsnr.psnr === Infinity ? '∞ dB' : `${encPsnr.psnr} dB`}
+                        <span className={`ml-2 capitalize font-normal px-2 py-0.5 rounded-full text-xs ${
+                          encPsnr.quality === 'excellent' ? 'bg-green-100 text-green-700' :
+                          encPsnr.quality === 'good'      ? 'bg-blue-100 text-blue-700' :
+                          encPsnr.quality === 'fair'      ? 'bg-yellow-100 text-yellow-700' :
+                                                             'bg-red-100 text-red-700'}`}>
+                          {encPsnr.quality}
+                        </span>
+                      </p>
+                      <p className="text-xs text-text/40 mt-0.5">
+                        {encPsnr.quality === 'excellent' || encPsnr.quality === 'good'
+                          ? '✓ Quality sufficient for clinical video review'
+                          : '⚠ Consider reducing compression for diagnostic video'}
+                      </p>
+                    </div>
+                  </div>
+                )}
                 <button onClick={downloadEnc}
                   className="w-full inline-flex items-center justify-center gap-2 px-6 py-3 rounded-xl bg-cta text-white text-sm font-bold shadow-sm hover:bg-cta/90 transition-colors cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-cta">
                   <Download className="w-4 h-4" />

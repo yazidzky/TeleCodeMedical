@@ -50,26 +50,47 @@ Sistem layanan kesehatan modern menghadapi tantangan kritis dalam transmisi data
 
 ## Fitur Utama
 
+### 🆕 Fitur Baru (v2)
+
+| Fitur | Detail |
+|---|---|
+| **Histogram Equalization** | Peningkatan kontras citra X-Ray/MRI sebelum encoding — visualisasi before/after slider |
+| **RLE Compression Analysis** | Run-Length Encoding stats per gambar, efektif untuk X-Ray dengan area seragam |
+| **AES-256-GCM Encryption** | Enkripsi payload via Web Crypto API sebelum LSB embed — PBKDF2 100k iterasi |
+| **PSNR Quality Metric** | Peak Signal-to-Noise Ratio antara frame asli vs terkompresi, threshold >40 dB untuk diagnosis |
+| **A-law G.711 Audio Codec** | Standar Eropa/ITU-T sebagai alternatif µ-law, dengan perbandingan langsung |
+| **SNR Audio Quality** | Signal-to-Noise Ratio antara audio asli dan hasil decode codec |
+| **Waveform Before/After** | Visualisasi waveform PCM asli vs setelah µ-law/A-law decode |
+| **Interactive Before/After Slider** | Komponen `BeforeAfterViewer` dengan drag slider, zoom, dan reset |
+| **Algorithm Demo di Dashboard** | Synthetic X-Ray di-generate di browser — demo Hist. EQ, LSB plane, RLE runs |
+| **AES Decrypt di Decode page** | Password prompt otomatis muncul saat file terdeteksi terenkripsi |
+
+---
+
 ### 🔐 Image Codec + Steganografi
 - **Encode**: Embed seluruh rekam medis pasien (JSON) ke dalam piksel gambar X-Ray/MRI/CT Scan menggunakan **LSB (Least Significant Bit) steganografi** pada channel R, G, B — 3 bit per piksel
-- **Decode**: Ekstrak data tersembunyi dari gambar stego, re-run analisis AI otomatis
-- **Kompresi**: DEFLATE ZIP level 9 via `fflate` sebagai container akhir
+- **Histogram Equalization**: Peningkatan kontras citra sebelum embed — CDF-based, BT.709 luminance
+- **RLE Analysis**: Run-Length Encoding stats — sangat efektif untuk X-Ray hitam-putih
+- **AES-256-GCM**: Enkripsi payload opsional via Web Crypto API (PBKDF2 · SHA-256 · 100k iter)
+- **PSNR metric**: Kualitas gambar setelah LSB embed — threshold >40 dB aman untuk diagnosis
+- **Decode**: Ekstrak data tersembunyi + AES decrypt otomatis jika payload terenkripsi
+- **Before/After slider**: Interaktif drag-to-compare dengan zoom + reset
 - **Magic header** `TCMD` (32-bit) untuk validasi integritas file
-- **Payload header** 32-bit uint32 untuk panjang data
 
-### 🎙️ Audio Codec (G.711 µ-law)
-- **Kompresi**: PCM 16-bit → µ-law 8-bit (rasio **2:1**, hemat 50% ukuran) sesuai standar G.711 telekomunikasi
-- **Dekompresi**: µ-law 8-bit → PCM 16-bit, kualitas suara terjaga
-- **Parser WAV**: Parsing penuh header RIFF/WAVE/fmt/data chunk, support mono & stereo
-- **Steganografi audio**: Metadata pasien di-embed di LSB setiap sampel WAV (magic header `TCMA`)
+### 🎙️ Audio Codec (G.711 µ-law + A-law)
+- **µ-law G.711**: Kompresi PCM 16-bit → 8-bit (rasio **2:1**, standar USA/Asia)
+- **A-law G.711**: Standar Eropa/ITU-T, pilihan codec dapat dibandingkan langsung di UI
+- **SNR metric**: Signal-to-Noise Ratio antara PCM asli dan hasil decode (>30 dB = acceptable)
+- **Waveform Before/After**: Visualisasi grafik gelombang PCM asli vs setelah decode codec
+- **Steganografi audio**: Metadata pasien di-embed di LSB setiap sampel WAV (magic `TCMA`)
 - **Output**: ZIP berisi WAV terenkode
 
 ### 🎬 Video Codec (Keyframe + Delta)
 - **Ekstraksi frame**: HTMLVideoElement + Canvas API, sampling 5 FPS, resolusi max 640px
 - **Kompresi Keyframe**: Frame ke-0 dan setiap ke-30 disimpan sebagai JPEG base64
-- **Kompresi Delta**: Frame sisanya hanya menyimpan piksel yang berubah > threshold 15 (sparse array) — efisiensi tinggi untuk video statis seperti konsultasi
-- **Steganografi video**: Metadata di-embed di pixel LSB keyframe (PNG lossless, magic header `TCMV`)
-- **Playback preview**: Render frame hasil dekode di canvas HTML
+- **Kompresi Delta**: Frame sisanya hanya menyimpan piksel yang berubah > threshold 15 (sparse array)
+- **PSNR keyframe**: Kualitas frame setelah JPEG compression — before/after slider interaktif
+- **Steganografi video**: Metadata di-embed di pixel LSB keyframe (PNG lossless, magic `TCMV`)
 
 ### 🧠 AI Clinical Analysis Engine
 - Knowledge base **8 penyakit** dengan ICD-10 code: Hipertensi (I10), Diabetes T2 (E11), Pneumonia (J18.9), Anemia (D50), Asma (J45), CKD (N18), ISK (N39.0), PPOK (J44)
@@ -255,6 +276,8 @@ src/
 │   ├── compression.js       # DEFLATE ZIP via fflate
 │   ├── audioCodec.js        # µ-law G.711 + WAV parser + audio LSB
 │   ├── videoCodec.js        # Frame extraction + keyframe+delta + video LSB
+│   ├── imageProcessing.js   # RLE, Hist.EQ, PSNR, AES-256-GCM, A-law, SNR, Waveform
+│   ├── demoImages.js        # Synthetic X-Ray generator + visualization helpers
 │   ├── aiAnalysis.js        # Rule-based AI engine + disease knowledge base
 │   ├── vitalsValidator.js   # Validasi tanda vital real-time
 │   ├── medicalHistory.js    # CRUD localStorage
@@ -263,6 +286,8 @@ src/
 │
 ├── components/
 │   ├── AIAnalysisPanel.jsx  # Panel hasil analisis AI
+│   ├── AlgorithmDemo.jsx    # Demo interaktif before/after (Dashboard)
+│   ├── BeforeAfterViewer.jsx# Slider before/after dengan zoom & reset
 │   ├── CompressionStats.jsx # Visualisasi statistik kompresi
 │   ├── VitalsWarningBox.jsx # Peringatan tanda vital abnormal
 │   ├── QRCodeCard.jsx       # Kartu QR code

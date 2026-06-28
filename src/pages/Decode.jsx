@@ -4,7 +4,7 @@ import {
   UploadCloud, ShieldCheck, Loader2, AlertCircle, Brain,
   User, Stethoscope, Calendar, Hash, Building2, Activity,
   FileText, CheckCircle2, ImageIcon, X, ChevronDown, ChevronUp,
-  Download, RefreshCw, Printer,
+  Download, RefreshCw, Printer, Lock,
 } from 'lucide-react';
 import { extractDataFromImage, loadImage, getImageData } from '../utils/steganography';
 import { extractFromZip } from '../utils/compression';
@@ -15,6 +15,7 @@ import TutorialOverlay from '../components/TutorialOverlay';
 import { exportToPDF } from '../utils/pdfExport';
 import { saveRecord } from '../utils/medicalHistory';
 import CompressionStats from '../components/CompressionStats';
+import { aesDecrypt, base64ToUint8 } from '../utils/imageProcessing';
 
 const DECODE_TUTORIAL = [
   { title: 'Dekode Data Medis', body: 'Upload file ZIP yang diterima dari dokter/enkoder. Sistem akan mengekstrak data pasien dari gambar steganografik secara otomatis.' },
@@ -72,6 +73,12 @@ export default function Decode() {
   const [error, setError] = useState(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [compressionInfo, setCompressionInfo] = useState(null);
+  // AES password prompt
+  const [needsPassword, setNeedsPassword] = useState(false);
+  const [pendingPayload, setPendingPayload] = useState(null);
+  const [pendingBlob, setPendingBlob]       = useState(null);
+  const [aesPassword, setAesPassword]       = useState('');
+  const [aesError, setAesError]             = useState(null);
   const fileInputRef = useRef(null);
 
   // ─── File Handling ────────────────────────────────────────────────────────
@@ -126,8 +133,18 @@ export default function Decode() {
         );
       }
 
-      // 4. Parse JSON
+      // 4. Handle AES encryption or plain JSON
       let data;
+      if (jsonStr.startsWith('AES256:')) {
+        // Encrypted payload — need password from user
+        const b64 = jsonStr.slice(7);
+        setPendingPayload(b64);
+        setPendingBlob(stegoBlob);
+        setIsProcessing(false);
+        setNeedsPassword(true);
+        return;
+      }
+
       try {
         data = JSON.parse(jsonStr);
       } catch (_) {
@@ -155,7 +172,6 @@ export default function Decode() {
         // Auto-save to local history
         saveRecord(data, 'decoded', freshAnalysis);
       }, 600);
-
     } catch (err) {
       console.error(err);
       setError(err.message || 'Failed to decode. Ensure this is a valid ZIP from TeleCode Medical.');
@@ -164,8 +180,37 @@ export default function Decode() {
     }
   };
 
-  const reRunAnalysis = () => {
-    if (!patientData) return;
+  // ─── Finish decoding after AES password submission ───────────────────────
+  const finishWithData = (data, stegoBlob) => {
+    if (!data || typeof data !== 'object') {
+      setError('Decoded data has unexpected format.'); return;
+    }
+    setPatientData(data);
+    const url = URL.createObjectURL(stegoBlob);
+    setImgUrl(url);
+    setIsAnalyzing(true);
+    setTimeout(() => {
+      const freshAnalysis = analyzePatientData(data);
+      setAnalysis(freshAnalysis);
+      setIsAnalyzing(false);
+      saveRecord(data, 'decoded', freshAnalysis);
+    }, 600);
+  };
+
+  const handleAesSubmit = async (e) => {
+    e.preventDefault();
+    setAesError(null);
+    try {
+      const decrypted = await aesDecrypt(base64ToUint8(pendingPayload), aesPassword);
+      const data = JSON.parse(decrypted);
+      setNeedsPassword(false);
+      finishWithData(data, pendingBlob);
+    } catch (err) {
+      setAesError(err.message.includes('Decryption failed') ? 'Wrong password — decryption failed.' : err.message);
+    }
+  };
+
+  const reRunAnalysis = () => {    if (!patientData) return;
     setIsAnalyzing(true);
     setTimeout(() => {
       setAnalysis(analyzePatientData(patientData));
@@ -176,6 +221,8 @@ export default function Decode() {
   const reset = () => {
     setFile(null); setPatientData(null); setAnalysis(null);
     setImgUrl(null); setError(null); setIsAnalyzing(false); setCompressionInfo(null);
+    setNeedsPassword(false); setPendingPayload(null); setPendingBlob(null);
+    setAesPassword(''); setAesError(null);
   };
 
   const downloadImage = () => {
@@ -303,7 +350,65 @@ export default function Decode() {
       )}
       </AnimatePresence>
 
-      {/* ── RESULTS ── */}
+      {/* ── AES Password Prompt ── */}
+      {needsPassword && !patientData && (
+        <motion.div
+          key="aes-prompt"
+          initial={{ opacity: 0, y: 16 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: -12 }}
+          transition={{ duration: 0.35 }}
+        >
+          <form onSubmit={handleAesSubmit}>
+            <div className="bg-white rounded-3xl border border-purple-200 shadow-sm overflow-hidden">
+              <div className="px-6 py-4 border-b border-purple-100 flex items-center gap-3 bg-purple-50">
+                <div className="w-10 h-10 rounded-xl bg-purple-100 flex items-center justify-center">
+                  <Lock className="w-5 h-5 text-purple-600" />
+                </div>
+                <div>
+                  <h2 className="font-heading font-bold text-text">AES-256-GCM Encrypted Payload</h2>
+                  <p className="text-xs text-text/50">This file was encoded with encryption. Enter the password to decrypt.</p>
+                </div>
+              </div>
+              <div className="p-6 space-y-4">
+                <div>
+                  <label className="block text-sm font-semibold text-text/70 mb-2">Decryption Password</label>
+                  <input
+                    type="password"
+                    autoFocus
+                    className="w-full rounded-xl border border-gray-200 bg-gray-50 px-3.5 py-2.5 text-sm text-text placeholder:text-text/30 focus:outline-none focus:ring-2 focus:ring-purple-400 focus:border-transparent focus:bg-white transition-all"
+                    placeholder="Enter the password used during encoding…"
+                    value={aesPassword}
+                    onChange={e => setAesPassword(e.target.value)}
+                  />
+                </div>
+                {aesError && (
+                  <div className="flex items-center gap-2 p-3 bg-red-50 border border-red-200 rounded-xl">
+                    <AlertCircle className="w-4 h-4 text-red-500 flex-shrink-0" />
+                    <p className="text-sm text-red-700">{aesError}</p>
+                  </div>
+                )}
+                <div className="p-3 bg-purple-50 border border-purple-100 rounded-xl text-xs text-purple-700 space-y-0.5">
+                  <p className="font-semibold">🔐 How AES-256-GCM works here:</p>
+                  <p>1. Your password → PBKDF2 (100,000 iterations, SHA-256) → 256-bit key</p>
+                  <p>2. Random 16-byte salt + 12-byte IV per encryption — each file is unique</p>
+                  <p>3. GCM mode provides authenticated encryption — tampering is detected</p>
+                </div>
+              </div>
+              <div className="px-6 py-4 border-t border-gray-100 flex justify-end gap-3">
+                <button type="button" onClick={() => { setNeedsPassword(false); setFile(null); }}
+                  className="px-5 py-2.5 rounded-xl border border-gray-200 text-sm font-semibold text-text/60 hover:bg-gray-50 transition-colors cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-primary">
+                  Cancel
+                </button>
+                <button type="submit" disabled={!aesPassword}
+                  className="inline-flex items-center gap-2 px-6 py-2.5 rounded-xl bg-purple-600 text-white text-sm font-semibold shadow-sm hover:bg-purple-700 transition-colors disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-purple-400">
+                  <Lock className="w-4 h-4" /> Decrypt &amp; Decode
+                </button>
+              </div>
+            </div>
+          </form>
+        </motion.div>
+      )}
       {patientData && (
         <motion.div
           initial={{ opacity: 0, y: 20 }}

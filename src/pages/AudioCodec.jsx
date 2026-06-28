@@ -1,12 +1,15 @@
 import { useState, useRef, useCallback } from 'react';
 import {
   Mic, Music, Upload, Download, ShieldCheck, Loader2,
-  CheckCircle2, AlertCircle, X, FileAudio, Zap, RefreshCw,
+  CheckCircle2, AlertCircle, X, FileAudio, Zap, RefreshCw, BarChart2,
 } from 'lucide-react';
 import {
   parseWav, buildWav, compressAudioMulaw, decompressAudioMulaw,
   embedDataInAudio, extractDataFromAudio, getCompressionInfo,
 } from '../utils/audioCodec';
+import {
+  compressAudioAlaw, decompressAudioAlaw, calculateAudioSNR, buildWaveformDataUrl,
+} from '../utils/imageProcessing';
 import { compressToZip, extractFromZip } from '../utils/compression';
 import { useLang } from '../i18n/LangContext';
 import TutorialOverlay from '../components/TutorialOverlay';
@@ -37,6 +40,7 @@ export default function AudioCodec() {
 
   const [encFile, setEncFile]           = useState(null);
   const [isDragEnc, setIsDragEnc]       = useState(false);
+  const [codec, setCodec]               = useState('mulaw'); // 'mulaw' | 'alaw'
   const [metadata, setMetadata]         = useState({
     patientName: '', patientId: '', doctorName: '',
     recordType: t('audio.recordTypes.voiceNote','Voice Note Diagnosis'),
@@ -68,19 +72,30 @@ export default function AudioCodec() {
     try {
       const buffer = await encFile.arrayBuffer();
       const { sampleRate, numChannels, bitsPerSample, samples, headerBytes } = parseWav(buffer);
-      const compressed   = compressAudioMulaw(samples);
+
+      // Compress with selected codec
+      const compressed   = codec === 'alaw' ? compressAudioAlaw(samples) : compressAudioMulaw(samples);
       const stats        = getCompressionInfo(samples, compressed.length);
-      const decompressed = decompressAudioMulaw(compressed);
-      const metaJson     = JSON.stringify({
-        ...metadata, codec: 'µ-law G.711',
+      const decompressed = codec === 'alaw' ? decompressAudioAlaw(compressed) : decompressAudioMulaw(compressed);
+
+      // Calculate SNR between original and decompressed
+      const snrResult = calculateAudioSNR(samples, decompressed);
+
+      // Build waveform images for before/after
+      const waveformBefore = buildWaveformDataUrl(samples,      300, 60, '#94A3B8');
+      const waveformAfter  = buildWaveformDataUrl(decompressed, 300, 60, '#0891B2');
+
+      const metaJson = JSON.stringify({
+        ...metadata, codec: codec === 'alaw' ? 'A-law G.711' : 'µ-law G.711',
         originalSampleRate: sampleRate, originalChannels: numChannels,
-        compressionRatio: stats.ratio, encodedAt: new Date().toISOString(),
+        compressionRatio: stats.ratio, snr: snrResult.snr, snrQuality: snrResult.quality,
+        encodedAt: new Date().toISOString(),
       });
       const stegoSamples = embedDataInAudio(decompressed, metaJson);
       const outBuffer    = buildWav(headerBytes, stegoSamples);
       const wavBlob      = new Blob([outBuffer], { type: 'audio/wav' });
       const zipBlob      = await compressToZip(wavBlob, 'medical_audio_encoded.wav');
-      setEncResult({ zipBlob, stats, sampleRate, numChannels, bitsPerSample, totalSamples: samples.length });
+      setEncResult({ zipBlob, stats, sampleRate, numChannels, bitsPerSample, totalSamples: samples.length, snrResult, waveformBefore, waveformAfter });
     } catch (err) { console.error(err); setEncError(err.message); }
     finally { setEncProcessing(false); }
   };
@@ -223,6 +238,24 @@ export default function AudioCodec() {
               {/* Metadata */}
               <div className="space-y-3">
                 <p className="text-xs font-bold uppercase tracking-widest text-primary/60">{t('audio.metaTitle')}</p>
+
+                {/* Codec Selector */}
+                <div>
+                  <label className="block text-xs font-semibold text-text/60 mb-1.5">Compression Codec</label>
+                  <div className="grid grid-cols-2 gap-2">
+                    {[
+                      { id: 'mulaw', label: 'µ-law G.711', sub: 'USA/Asia standard' },
+                      { id: 'alaw',  label: 'A-law G.711', sub: 'European standard' },
+                    ].map(({ id, label, sub }) => (
+                      <button key={id} type="button" onClick={() => setCodec(id)}
+                        className={`px-3 py-2.5 rounded-xl border text-left transition-colors cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-primary
+                          ${codec === id ? 'bg-primary/8 border-primary/30 text-primary' : 'bg-gray-50 border-gray-200 text-text/60 hover:border-primary/20'}`}>
+                        <p className="text-xs font-bold">{label}</p>
+                        <p className="text-xs opacity-60">{sub}</p>
+                      </button>
+                    ))}
+                  </div>
+                </div>
                 <div className="grid grid-cols-2 gap-3">
                   <div>
                     <label className="block text-xs font-semibold text-text/60 mb-1">{t('audio.patientName')} <span className="text-red-500">*</span></label>
@@ -282,6 +315,43 @@ export default function AudioCodec() {
                   <StatBox label={t('audio.ratio')}        value={`${encResult.stats.ratio}:1`} sub={t('audio.compression')} />
                   <StatBox label={t('audio.saved')}        value={`${encResult.stats.saved}%`}  sub={t('audio.reduction')} />
                 </div>
+
+                {/* Waveform Before / After */}
+                {encResult.waveformBefore && encResult.waveformAfter && (
+                  <div className="space-y-2">
+                    <p className="text-xs font-bold uppercase tracking-widest text-primary/60 flex items-center gap-1.5">
+                      <BarChart2 className="w-3.5 h-3.5" /> Waveform — Original vs After {codec === 'alaw' ? 'A-law' : 'µ-law'} Codec
+                    </p>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="bg-gray-50 rounded-xl p-2 border border-gray-100">
+                        <p className="text-xs text-text/40 mb-1.5">Original PCM (16-bit)</p>
+                        <img src={encResult.waveformBefore} alt="Original waveform" className="w-full rounded-lg" />
+                      </div>
+                      <div className="bg-primary/5 rounded-xl p-2 border border-primary/15">
+                        <p className="text-xs text-primary/70 mb-1.5">After {codec === 'alaw' ? 'A-law' : 'µ-law'} Decode (8-bit)</p>
+                        <img src={encResult.waveformAfter} alt="Codec waveform" className="w-full rounded-lg" />
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* SNR Quality */}
+                {encResult.snrResult && (
+                  <div className={`p-3 rounded-xl border flex items-center gap-3 ${
+                    encResult.snrResult.quality === 'excellent' ? 'bg-green-50 border-green-200' :
+                    encResult.snrResult.quality === 'good'      ? 'bg-blue-50 border-blue-200' :
+                    encResult.snrResult.quality === 'fair'      ? 'bg-yellow-50 border-yellow-200' :
+                                                                   'bg-red-50 border-red-200'}`}>
+                    <Zap className="w-4 h-4 text-primary flex-shrink-0" />
+                    <div>
+                      <p className="text-xs font-bold text-text">
+                        SNR: {encResult.snrResult.snr === Infinity ? '∞ dB (lossless)' : `${encResult.snrResult.snr} dB`}
+                        <span className="ml-2 capitalize font-normal text-text/50">— {encResult.snrResult.quality}</span>
+                      </p>
+                      <p className="text-xs text-text/40 mt-0.5">Signal-to-noise ratio between original and {codec === 'alaw' ? 'A-law' : 'µ-law'} decoded audio. {'>'}30 dB = acceptable for medical voice.</p>
+                    </div>
+                  </div>
+                )}
                 <div className="grid grid-cols-3 gap-3 text-sm">
                   <div className="bg-gray-50 rounded-xl p-3"><p className="text-xs text-text/40">{t('audio.sampleRate')}</p><p className="font-bold text-text">{encResult.sampleRate.toLocaleString()} Hz</p></div>
                   <div className="bg-gray-50 rounded-xl p-3"><p className="text-xs text-text/40">{t('audio.channels')}</p><p className="font-bold text-text">{encResult.numChannels===1?'Mono':'Stereo'}</p></div>

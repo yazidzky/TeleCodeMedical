@@ -6,6 +6,7 @@ import {
   Layers, FileSearch, ClipboardList, Mic, Video, Music, Search,
 } from 'lucide-react';
 import TutorialOverlay from '../components/TutorialOverlay';
+import AlgorithmDemo from '../components/AlgorithmDemo';
 
 // Shared animation variants
 const fadeUp = (delay = 0) => ({
@@ -218,6 +219,9 @@ export default function Dashboard() {
           </motion.div>
         ))}
       </motion.section>
+
+      {/* ── Algorithm Demo (Before / After interactive) ─────────────────── */}
+      <AlgorithmDemo />
 
       {/* ── Workflow + AI Diseases ────────────────────────────────────────── */}
       <motion.section

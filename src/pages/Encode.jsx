@@ -3,7 +3,8 @@ import { motion, AnimatePresence } from 'framer-motion';
 import {
   UploadCloud, FileLock2, ShieldCheck, Download, Loader2,
   Brain, User, Stethoscope, Activity, FileText, ChevronRight,
-  CheckCircle2, ImageIcon, X, Printer,
+  CheckCircle2, ImageIcon, X, Printer, Lock, Zap, SlidersHorizontal,
+  BarChart2, Eye,
 } from 'lucide-react';
 import { embedDataInImage, loadImage, getImageData, imageDataToBlob } from '../utils/steganography';
 import { compressToZip } from '../utils/compression';
@@ -15,7 +16,13 @@ import QRCodeCard from '../components/QRCodeCard';
 import VitalsWarningBox from '../components/VitalsWarningBox';
 import TutorialOverlay from '../components/TutorialOverlay';
 import CompressionStats from '../components/CompressionStats';
+import BeforeAfterViewer from '../components/BeforeAfterViewer';
 import { validateVitalsText, validateAge } from '../utils/vitalsValidator';
+import {
+  rleEncodeImage, getRleStats,
+  histogramEqualization, calculatePSNR,
+  aesEncrypt, uint8ToBase64,
+} from '../utils/imageProcessing';
 
 // Framer Motion variants
 const pageVariants = {
@@ -93,6 +100,24 @@ export default function Encode() {
   const [compressionInfo, setCompressionInfo] = useState(null); // { originalSize, compressedSize }
   const fileInputRef = useRef(null);
 
+  // ─── New feature states ───────────────────────────────────────────────────
+  // Image processing options
+  const [useHistEq, setUseHistEq]     = useState(false);
+  const [useRle, setUseRle]           = useState(false);
+  const [useAes, setUseAes]           = useState(false);
+  const [aesPassword, setAesPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+
+  // Before/After preview
+  const [beforeSrc, setBeforeSrc]     = useState(null);
+  const [afterSrc, setAfterSrc]       = useState(null);
+  const [stegoSrc, setStegoSrc]       = useState(null);  // LSB stego preview
+
+  // Quality & compression metrics
+  const [psnrResult, setPsnrResult]   = useState(null);  // { psnr, quality }
+  const [rleStats, setRleStats]       = useState(null);  // { ratio, saved, ... }
+  const [processStage, setProcessStage] = useState('');
+
   // ─── Helpers ─────────────────────────────────────────────────────────────────
   const set = (key, val) => setPatientData(prev => ({ ...prev, [key]: val }));
 
@@ -105,8 +130,13 @@ export default function Encode() {
     if (!selectedFile.type.startsWith('image/')) { alert('Please upload an image file (PNG, JPG, JPEG).'); return; }
     setFile(selectedFile);
     setResultZip(null);
+    setPsnrResult(null);
+    setRleStats(null);
+    setAfterSrc(null);
+    setStegoSrc(null);
     const url = URL.createObjectURL(selectedFile);
     setFilePreview(url);
+    setBeforeSrc(url);
   }, []);
 
   const onInputChange = (e) => { if (e.target.files?.[0]) handleFileChange(e.target.files[0]); };
@@ -139,18 +169,44 @@ export default function Encode() {
   const handleEncode = async (e) => {
     e.preventDefault();
     if (!file) return;
+    if (useAes && !aesPassword) { alert('Please enter an encryption password.'); return; }
     setIsProcessing(true);
+    setProcessStage('Loading image…');
     try {
-      // Strip aiAnalysis from embedded payload — it will be re-generated on decode.
-      // This keeps the payload small enough to fit in most medical images.
-      const { aiAnalysis: _stripped, ...patientOnly } = { ...patientData, aiAnalysis: undefined };
-      const payload = JSON.stringify(patientOnly);
-
       const img = await loadImage(file);
-      const imageData = getImageData(img);
+      let imageData = getImageData(img);
 
-      // Check capacity before embedding
-      const capacityBytes = Math.floor((imageData.data.length / 4) * 3 / 8) - 8; // minus headers
+      // ── Step A: Histogram Equalization (optional) ──
+      let enhancedImageData = imageData;
+      if (useHistEq) {
+        setProcessStage('Applying histogram equalization…');
+        enhancedImageData = histogramEqualization(imageData);
+        // Build "after enhancement" preview
+        const eqBlob = await imageDataToBlob(enhancedImageData);
+        setAfterSrc(URL.createObjectURL(eqBlob));
+      }
+
+      // ── Step B: RLE Compression stats (optional, informational) ──
+      if (useRle) {
+        setProcessStage('Computing RLE compression stats…');
+        const rleResult = rleEncodeImage(enhancedImageData);
+        setRleStats(getRleStats(rleResult.originalBytes, rleResult.compressedBytes));
+      }
+
+      // ── Step C: Build payload ──
+      const { aiAnalysis: _stripped, ...patientOnly } = { ...patientData, aiAnalysis: undefined };
+      let payload = JSON.stringify(patientOnly);
+
+      // ── Step D: AES-256-GCM encryption (optional) ──
+      if (useAes) {
+        setProcessStage('Encrypting payload with AES-256-GCM…');
+        const encrypted = await aesEncrypt(payload, aesPassword);
+        // Store as base64 string with AES prefix so decoder knows it's encrypted
+        payload = 'AES256:' + uint8ToBase64(encrypted);
+      }
+
+      // Check capacity
+      const capacityBytes = Math.floor((enhancedImageData.data.length / 4) * 3 / 8) - 8;
       const payloadBytes = new TextEncoder().encode(payload).length;
       if (payloadBytes > capacityBytes) {
         const neededSide = Math.ceil(Math.sqrt(Math.ceil((payloadBytes * 8 + 64) / 3)));
@@ -161,8 +217,23 @@ export default function Encode() {
         );
       }
 
-      const stegoImageData = embedDataInImage(imageData, payload);
+      // ── Step E: LSB steganography ──
+      setProcessStage('Embedding data via LSB steganography…');
+      const stegoImageData = embedDataInImage(enhancedImageData, payload);
       const stegoBlob = await imageDataToBlob(stegoImageData);
+
+      // Build stego preview & PSNR
+      const stegoUrl = URL.createObjectURL(stegoBlob);
+      setStegoSrc(stegoUrl);
+      // PSNR between enhanced (before LSB) and stego (after LSB)
+      const psnr = calculatePSNR(enhancedImageData, stegoImageData);
+      setPsnrResult(psnr);
+
+      // If histogram eq was not applied, set afterSrc to stego for comparison
+      if (!useHistEq) setAfterSrc(stegoUrl);
+
+      // ── Step F: ZIP compression ──
+      setProcessStage('Compressing into ZIP…');
       const { blob: zipBlob, originalSize, compressedSize } = await compressToZip(stegoBlob, 'securely_encoded.png');
       setResultZip(zipBlob);
       setCompressionInfo({ originalSize, compressedSize });
@@ -173,6 +244,7 @@ export default function Encode() {
       alert('Encoding error: ' + err.message);
     } finally {
       setIsProcessing(false);
+      setProcessStage('');
     }
   };
 
@@ -190,6 +262,8 @@ export default function Encode() {
 
   const reset = () => {
     setCurrentStep(1); setAnalysis(null); setResultZip(null); setCompressionInfo(null);
+    setPsnrResult(null); setRleStats(null); setAfterSrc(null); setStegoSrc(null); setBeforeSrc(null);
+    setProcessStage('');
     removeFile();
     setPatientData({ name:'',id:'',age:'',gender:'',diagnosis:'',symptoms:'',vitals:'',medicalHistory:'',chiefComplaint:'',notes:'',date:new Date().toISOString().split('T')[0],doctor:'',hospital:'' });
   };
@@ -423,7 +497,7 @@ export default function Encode() {
                 )}
               </div>
 
-              {/* Summary */}
+              {/* Summary + Processing Options */}
               <div className="space-y-4">
                 <div>
                   <p className="text-xs font-bold uppercase tracking-widest text-primary/60 mb-2 flex items-center gap-1.5">
@@ -455,16 +529,77 @@ export default function Encode() {
                     <div className="p-3 bg-blue-50 border border-blue-100 rounded-xl text-xs text-blue-700 space-y-1">
                       <p className="font-semibold">Payload size: ~{payloadBytes} bytes</p>
                       <p className="text-blue-600">Image must be at least <span className="font-bold">{minSide}×{minSide}px</span> to fit this data.</p>
-                      <p className="text-blue-500">Tip: use 512×512px or larger for best results.</p>
                     </div>
                   );
                 })()}
+
+                {/* ── Processing Options ── */}
+                <div className="border border-primary/10 rounded-2xl overflow-hidden">
+                  <div className="px-4 py-3 bg-primary/4 flex items-center gap-2">
+                    <SlidersHorizontal className="w-4 h-4 text-primary" />
+                    <p className="text-xs font-bold text-text">Processing Options</p>
+                  </div>
+                  <div className="px-4 py-3 space-y-3">
+
+                    {/* Histogram Equalization */}
+                    <label className="flex items-start gap-3 cursor-pointer group">
+                      <input type="checkbox" checked={useHistEq} onChange={e => setUseHistEq(e.target.checked)}
+                        className="mt-0.5 w-4 h-4 rounded accent-primary cursor-pointer" />
+                      <div>
+                        <p className="text-xs font-semibold text-text group-hover:text-primary transition-colors flex items-center gap-1.5">
+                          <Eye className="w-3.5 h-3.5 text-primary" /> Histogram Equalization
+                        </p>
+                        <p className="text-xs text-text/45 mt-0.5">Enhance X-Ray/MRI contrast before embed. Before/after preview will be shown.</p>
+                      </div>
+                    </label>
+
+                    {/* RLE Stats */}
+                    <label className="flex items-start gap-3 cursor-pointer group">
+                      <input type="checkbox" checked={useRle} onChange={e => setUseRle(e.target.checked)}
+                        className="mt-0.5 w-4 h-4 rounded accent-primary cursor-pointer" />
+                      <div>
+                        <p className="text-xs font-semibold text-text group-hover:text-primary transition-colors flex items-center gap-1.5">
+                          <BarChart2 className="w-3.5 h-3.5 text-primary" /> RLE Compression Analysis
+                        </p>
+                        <p className="text-xs text-text/45 mt-0.5">Compute Run-Length Encoding stats. Effective for X-Ray with large uniform areas.</p>
+                      </div>
+                    </label>
+
+                    {/* AES Encryption */}
+                    <label className="flex items-start gap-3 cursor-pointer group">
+                      <input type="checkbox" checked={useAes} onChange={e => setUseAes(e.target.checked)}
+                        className="mt-0.5 w-4 h-4 rounded accent-primary cursor-pointer" />
+                      <div className="flex-1">
+                        <p className="text-xs font-semibold text-text group-hover:text-primary transition-colors flex items-center gap-1.5">
+                          <Lock className="w-3.5 h-3.5 text-primary" /> AES-256-GCM Encryption
+                        </p>
+                        <p className="text-xs text-text/45 mt-0.5">Encrypt payload before LSB embed. Decoder needs the password.</p>
+                        {useAes && (
+                          <div className="mt-2 relative">
+                            <input
+                              type={showPassword ? 'text' : 'password'}
+                              className="w-full rounded-xl border border-primary/20 bg-white px-3 py-2 text-xs text-text placeholder:text-text/30 focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent"
+                              placeholder="Enter encryption password…"
+                              value={aesPassword}
+                              onChange={e => setAesPassword(e.target.value)}
+                            />
+                            <button type="button" onClick={() => setShowPassword(p => !p)}
+                              className="absolute right-2 top-1/2 -translate-y-1/2 text-xs text-text/40 hover:text-primary cursor-pointer">
+                              {showPassword ? 'Hide' : 'Show'}
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    </label>
+                  </div>
+                </div>
 
                 <div className="space-y-2 pt-1 border-t border-gray-100">
                   {[
                     { icon: ShieldCheck, text: 'LSB steganography embedding' },
                     { icon: FileText,    text: 'DEFLATE ZIP compression' },
                     { icon: Brain,       text: 'AI re-generated on decode' },
+                    { icon: Zap,         text: 'PSNR quality metric after encode' },
                   ].map(({ icon: Icon, text }) => (
                     <div key={text} className="flex items-center gap-2 text-xs text-text/60">
                       <Icon className="w-3.5 h-3.5 text-primary" /> {text}
@@ -483,7 +618,7 @@ export default function Encode() {
                 disabled={!file || isProcessing}
                 className="inline-flex items-center gap-2 px-6 py-2.5 rounded-xl bg-primary text-white text-sm font-semibold shadow-sm hover:bg-primary/90 transition-colors disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-primary">
                 {isProcessing
-                  ? <><Loader2 className="w-4 h-4 animate-spin" /> Encoding + Zipping…</>
+                  ? <><Loader2 className="w-4 h-4 animate-spin" /> {processStage || 'Processing…'}</>
                   : <><ShieldCheck className="w-4 h-4" /> Encode &amp; Compress</>}
               </button>
             </div>
@@ -531,6 +666,110 @@ export default function Encode() {
                   </motion.div>
                 ))}
               </div>
+
+              {/* ── Before / After Viewer ── */}
+              {beforeSrc && (stegoSrc || afterSrc) && (
+                <motion.div
+                  className="space-y-3"
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ delay: 0.2 }}
+                >
+                  <p className="text-xs font-bold uppercase tracking-widest text-primary/60 flex items-center gap-1.5">
+                    <Eye className="w-3.5 h-3.5" />
+                    {useHistEq ? 'Before Encoding vs After Histogram Equalization' : 'Original vs Stego Image (LSB embedded)'}
+                  </p>
+                  <BeforeAfterViewer
+                    beforeSrc={beforeSrc}
+                    afterSrc={useHistEq ? afterSrc : stegoSrc}
+                    beforeLabel="Original"
+                    afterLabel={useHistEq ? 'Hist. EQ' : 'Stego (LSB)'}
+                    height={280}
+                  />
+                  {/* Stego vs original comparison if hist eq was also applied */}
+                  {useHistEq && stegoSrc && (
+                    <>
+                      <p className="text-xs font-bold uppercase tracking-widest text-primary/60 flex items-center gap-1.5 pt-2">
+                        <ShieldCheck className="w-3.5 h-3.5" /> After Enhancement vs After LSB Steganography
+                      </p>
+                      <BeforeAfterViewer
+                        beforeSrc={afterSrc}
+                        afterSrc={stegoSrc}
+                        beforeLabel="Enhanced"
+                        afterLabel="Stego (LSB)"
+                        height={220}
+                      />
+                    </>
+                  )}
+                </motion.div>
+              )}
+
+              {/* ── Metrics Row ── */}
+              <motion.div
+                className="grid grid-cols-1 sm:grid-cols-3 gap-3"
+                initial={{ opacity: 0, y: 8 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: 0.3 }}
+              >
+                {/* PSNR */}
+                {psnrResult && (
+                  <div className={`p-4 rounded-2xl border ${
+                    psnrResult.quality === 'excellent' ? 'bg-green-50 border-green-200' :
+                    psnrResult.quality === 'good'      ? 'bg-blue-50 border-blue-200' :
+                    psnrResult.quality === 'fair'      ? 'bg-yellow-50 border-yellow-200' :
+                                                         'bg-red-50 border-red-200'}`}>
+                    <div className="flex items-center gap-2 mb-1">
+                      <BarChart2 className="w-4 h-4 text-primary" />
+                      <p className="text-xs font-bold text-text">PSNR Quality</p>
+                    </div>
+                    <p className={`text-2xl font-heading font-bold ${
+                      psnrResult.quality === 'excellent' ? 'text-green-700' :
+                      psnrResult.quality === 'good'      ? 'text-blue-700' :
+                      psnrResult.quality === 'fair'      ? 'text-yellow-700' : 'text-red-700'}`}>
+                      {psnrResult.psnr === Infinity ? '∞' : `${psnrResult.psnr} dB`}
+                    </p>
+                    <p className="text-xs text-text/50 mt-0.5 capitalize">{psnrResult.quality} — {
+                      psnrResult.quality === 'excellent' ? 'safe for diagnosis' :
+                      psnrResult.quality === 'good'      ? 'acceptable quality' :
+                      psnrResult.quality === 'fair'      ? 'review recommended' : 'not for diagnosis'
+                    }</p>
+                    <p className="text-xs text-text/35 mt-1">MSE: {psnrResult.mse}</p>
+                  </div>
+                )}
+
+                {/* RLE Stats */}
+                {rleStats && (
+                  <div className={`p-4 rounded-2xl border ${rleStats.effective ? 'bg-green-50 border-green-200' : 'bg-gray-50 border-gray-200'}`}>
+                    <div className="flex items-center gap-2 mb-1">
+                      <Zap className="w-4 h-4 text-primary" />
+                      <p className="text-xs font-bold text-text">RLE Compression</p>
+                    </div>
+                    <p className={`text-2xl font-heading font-bold ${rleStats.effective ? 'text-green-700' : 'text-gray-600'}`}>
+                      {rleStats.ratio}×
+                    </p>
+                    <p className="text-xs text-text/50 mt-0.5">{rleStats.saved}% size reduction</p>
+                    <p className="text-xs text-text/35 mt-1">
+                      {(rleStats.originalBytes / 1024).toFixed(0)} KB → {(rleStats.compressedBytes / 1024).toFixed(0)} KB
+                    </p>
+                    {!rleStats.effective && (
+                      <p className="text-xs text-amber-600 mt-1">Non-uniform image — RLE not effective</p>
+                    )}
+                  </div>
+                )}
+
+                {/* AES indicator */}
+                {useAes && (
+                  <div className="p-4 rounded-2xl border bg-purple-50 border-purple-200">
+                    <div className="flex items-center gap-2 mb-1">
+                      <Lock className="w-4 h-4 text-purple-600" />
+                      <p className="text-xs font-bold text-text">AES-256-GCM</p>
+                    </div>
+                    <p className="text-2xl font-heading font-bold text-purple-700">Encrypted</p>
+                    <p className="text-xs text-text/50 mt-0.5">Payload secured with password</p>
+                    <p className="text-xs text-purple-600 mt-1">PBKDF2 · 100k iterations · SHA-256</p>
+                  </div>
+                )}
+              </motion.div>
 
               <div className="flex flex-col sm:flex-row gap-3 pt-2">
                 <button onClick={downloadZip}
