@@ -389,7 +389,7 @@ git push origin feature/nama-fitur
 
 ## Lisensi
 
-MIT License © 2025 [yazidzky](https://github.com/yazidzky)
+MIT License © 2026 [yazidzky](https://github.com/yazidzky)
 
 ---
 
