@@ -94,7 +94,7 @@ export default function AudioCodec() {
       const stegoSamples = embedDataInAudio(decompressed, metaJson);
       const outBuffer    = buildWav(headerBytes, stegoSamples);
       const wavBlob      = new Blob([outBuffer], { type: 'audio/wav' });
-      const zipBlob      = await compressToZip(wavBlob, 'medical_audio_encoded.wav');
+      const { blob: zipBlob } = await compressToZip(wavBlob, 'medical_audio_encoded.wav');
       setEncResult({ zipBlob, stats, sampleRate, numChannels, bitsPerSample, totalSamples: samples.length, snrResult, waveformBefore, waveformAfter });
     } catch (err) { console.error(err); setEncError(err.message); }
     finally { setEncProcessing(false); }
