@@ -121,7 +121,7 @@ export default function VideoCodec() {
       setEncStage('Zipping payload…');
       const json = JSON.stringify({ frames: stegoFrames, width, height, meta: 'TCMV1' });
       const jsonBlob = new Blob([json], { type: 'application/json' });
-      const zipBlob = await compressToZip(jsonBlob, 'medical_video_encoded.json');
+      const { blob: zipBlob } = await compressToZip(jsonBlob, 'medical_video_encoded.json');
       setEncProgress(100);
       setEncStage('Done');
 
